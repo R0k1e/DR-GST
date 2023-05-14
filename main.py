@@ -52,43 +52,66 @@ def train(model_path, idx_train, idx_val, idx_test, features, adj, pseudo_labels
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+     # Get the number of classes
     nclass = labels.max().item() + 1
-    # Model and optimizer
+     # Get the model
     model = get_models(args, features.shape[1], nclass, g=g)
+     # Create the optimizer
     optimizer = optim.Adam(model.parameters(),
                            lr=args.lr, weight_decay=args.weight_decay)
+     # Move the model to the device
     model.to(device)
+     # Initialize the best loss and bad counter
     best, bad_counter = 100, 0
+     # Train the model for the given number of epochs
     for epoch in range(args.epochs):
+        # Set the model to training mode
         model.train()
+         # Zero the gradients
         optimizer.zero_grad()
+         # Get the output of the model
         output = model(features, adj)
+         # Softmax the output
         output = torch.softmax(output, dim=1)
+         # Multiply the output with the transformation matrix
         output = torch.mm(output, T)
+         # Calculate the loss for the training set
         sign = False
         loss_train = weighted_cross_entropy(output[idx_train], pseudo_labels[idx_train], bald[idx_train], args.beta, nclass, sign)
         # loss_train = criterion(output[idx_train], pseudo_labels[idx_train])
+        # Calculate the accuracy for the training set
         acc_train = accuracy(output[idx_train], pseudo_labels[idx_train])
+         # Backpropagate the loss
         loss_train.backward()
+         # Update the weights
         optimizer.step()
-
-
+         # Set the model to evaluation mode
         with torch.no_grad():
             model.eval()
+             # Get the output of the model
             output = model(features, adj)
+             # Calculate the loss for the validation set
             loss_val = criterion(output[idx_val], labels[idx_val])
+             # Calculate the loss for the test set
             loss_test = criterion(output[idx_test], labels[idx_test])
+             # Calculate the accuracy for the validation set
             acc_val = accuracy(output[idx_val], labels[idx_val])
+             # Calculate the accuracy for the test set
             acc_test = accuracy(output[idx_test], labels[idx_test])
-
+         # Check if the loss for the validation set is the best
         if loss_val < best:
+            # Save the model to the given path
             torch.save(model.state_dict(), model_path, _use_new_zipfile_serialization=False)
+             # Update the best loss
             best = loss_val
+             # Reset the bad counter
             bad_counter = 0
+             # Store the best output
             best_output = output
         else:
+            # Increment the bad counter
             bad_counter += 1
-
+         # Check if the bad counter has reached the patience
         if bad_counter == args.patience:
             break
 
@@ -138,7 +161,7 @@ def main(dataset, model_path):
     nclass = labels.max().item() + 1
     # Get the mc_adj if drop_method is dropedge
     if args.drop_method == 'dropedge':
-        mc_adj = get_mc_adj(oadj, device, args.droprate)
+        mc_adj = get_mc_adj(oadj, device, args.droprate) #Eq 8
 
     if args.labelrate != 20:
         idx_train[train_index] = True
@@ -148,25 +171,31 @@ def main(dataset, model_path):
     pseudo_labels = labels.clone().to(device)
     # Initialize bald and T
     bald = torch.ones(n_node).to(device)
+    # T is diagonal matrix
     T = nn.Parameter(torch.eye(nclass, nclass).to(device)) # transition matrix
     T.requires_grad = False
     # Generate random seed
     seed = np.random.randint(0, 10000)
     # Loop through stages
     for s in range(args.stage):
-        # Train the model
+        #step 1 train student with T
+        #step 6 Eq 13 train student without T
+        #step 8,9 retrain student with T and instead of teacher
         best_output = train(model_path, idx_train_ag, idx_val, idx_test, features, adj, pseudo_labels, labels, bald, T, g, seed)
-        # Update T
+
+        #step 7 Eq 15 Update T
         T = update_T(best_output, idx_train, labels, T, device)
-        # Get indices of unlabeled nodes
+
+        #step 3  Get indices of unlabeled nodes
         idx_unlabeled = ~(idx_train | idx_test | idx_val)
-        # Get bald based on drop_method
+
+        #step 5 Eq12 calculate B based on drop_method
         if args.drop_method == 'dropout':
             bald = uncertainty_dropout(adj, features, nclass, model_path, args, device)
         elif args.drop_method == 'dropedge':
             bald = uncertainty_dropedge(mc_adj, adj, features, nclass, model_path, args, device)
 
-        # generate pseudo labels
+        #step 4 generate pseudo labels
         state_dict = torch.load(model_path)
         model = get_models(args, features.shape[1], nclass, g=g)
         model.load_state_dict(state_dict)
